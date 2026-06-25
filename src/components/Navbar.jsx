@@ -6,7 +6,7 @@ const NAV_LINKS = [
   { label: 'Dashboard', view: 'dashboard' },
   { label: 'Tasks', view: 'tasks' },
   { label: 'Add Task', view: 'add' },
-  { label: 'Test 5', view: 'test5' },
+  { label: 'Test 6', view: 'test6' },
 ]
 
 export default function Navbar({ currentView, onNavigate }) {

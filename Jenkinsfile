@@ -14,7 +14,6 @@ pipeline {
     }
 
     stages {
-
         stage("Select Environment") {
             steps {
                 script {
@@ -35,11 +34,21 @@ pipeline {
                     echo "PATH: ${env.DEPLOY_PATH}"
                 }
             }
+            post {
+                always {
+                    echo "=================================================================================================="
+                }
+            }
         }
 
         stage("Clone Repo") {
             steps {
                 git branch: env.BRANCH_NAME, url: env.GIT_URL
+            }
+            post {
+                always {
+                    echo "=================================================================================================="
+                }
             }
         }
 
@@ -48,6 +57,11 @@ pipeline {
                 sh """
                     docker build -t ${IMAGE_NAME}:latest .
                 """
+            }
+            post {
+                always {
+                    echo "=================================================================================================="
+                }
             }
         }
 
@@ -70,43 +84,52 @@ pipeline {
                     """
                 }
             }
+            post {
+                always {
+                    echo "=================================================================================================="
+
+                }
+            }
         }
 
         stage("Deploy on EC2 (Pull + Extract + Copy)") {
             steps {
                 sh """
-ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
+                    ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
+                        aws ecr get-login-password --region ap-south-1 | \
+                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-    aws ecr get-login-password --region ap-south-1 | \
-    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
 
-    docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                        docker rm -f taskflow-temp || true
 
-    docker rm -f taskflow-temp || true
+                        CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest)
 
-    CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest)
+                        rm -rf /tmp/taskflow-dist
+                        mkdir -p /tmp/taskflow-dist
 
-    rm -rf /tmp/taskflow-dist
-    mkdir -p /tmp/taskflow-dist
+                        docker cp \$CONTAINER_ID:/usr/share/nginx/html/. /tmp/taskflow-dist
 
-    docker cp \$CONTAINER_ID:/usr/share/nginx/html/. /tmp/taskflow-dist
+                        docker rm -f \$CONTAINER_ID || true
 
-    docker rm -f \$CONTAINER_ID || true
+                        sudo mkdir -p /var/www/prod
+                        sudo rm -rf /var/www/prod/*
 
-    sudo mkdir -p /var/www/prod
-    sudo rm -rf /var/www/prod/*
+                        sudo cp -r /tmp/taskflow-dist/* /var/www/prod/
 
-    sudo cp -r /tmp/taskflow-dist/* /var/www/prod/
-
-    sudo systemctl reload nginx || sudo systemctl restart nginx || true
-'
-"""
+                        sudo systemctl reload nginx || sudo systemctl restart nginx || true
+                    '
+                """
+            }
+            post {
+                always {
+                    echo "=================================================================================================="
+                }
             }
         }
     }
 
     post {
-
         success {
             slackSend(
                 channel: "#jenkins-notifications",
