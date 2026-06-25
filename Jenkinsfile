@@ -9,7 +9,6 @@ pipeline {
         ECR_REGISTRY = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
         ECR_REPOSITORY = "taskflow"
 
-        IMAGE_NAME = "taskflow"
         IMAGE_VERSION = "1.0.${BUILD_NUMBER}"
         CONTAINER_NAME = "taskflow-temp"
     }
@@ -30,6 +29,8 @@ pipeline {
 
                     env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
                     env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
+                    env.IMAGE_NAME = (env.ENV == "PROD") ? "taskflow-prod" : "taskflow-dev"
+
 
                     echo "ENV: ${env.ENV}"
                     echo "BRANCH: ${env.BRANCH_NAME}"
