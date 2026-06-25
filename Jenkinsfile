@@ -29,11 +29,14 @@ pipeline {
 
                     env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
                     env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
-                    env.IMAGE_VERSION = (env.ENV == "PROD") ? "1.0.${BUILD_NUMBER} PROD" : "1.0.${BUILD_NUMBER} DEV"
-    
+
+                    // ✅ FIXED: safe Docker tag (NO spaces)
+                    env.IMAGE_VERSION = "1.0.${BUILD_NUMBER}-${env.ENV}"
+
                     echo "ENV: ${env.ENV}"
                     echo "BRANCH: ${env.BRANCH_NAME}"
                     echo "DEPLOY_PATH: ${env.DEPLOY_PATH}"
+                    echo "IMAGE_VERSION: ${env.IMAGE_VERSION}"
                 }
             }
             post {
