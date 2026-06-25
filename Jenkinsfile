@@ -10,10 +10,12 @@ pipeline {
         ECR_REPOSITORY = "taskflow"
 
         IMAGE_NAME = "taskflow"
+        IMAGE_VERSION = "1.0.${BUILD_NUMBER}"
         CONTAINER_NAME = "taskflow-temp"
     }
 
     stages {
+
         stage("Select Environment") {
             steps {
                 script {
@@ -31,7 +33,7 @@ pipeline {
 
                     echo "ENV: ${env.ENV}"
                     echo "BRANCH: ${env.BRANCH_NAME}"
-                    echo "PATH: ${env.DEPLOY_PATH}"
+                    echo "DEPLOY_PATH: ${env.DEPLOY_PATH}"
                 }
             }
             post {
@@ -55,7 +57,7 @@ pipeline {
         stage("Build Docker Image") {
             steps {
                 sh """
-                    docker build -t ${IMAGE_NAME}:latest .
+                    docker build -t ${IMAGE_NAME}:${IMAGE_VERSION} .
                 """
             }
             post {
@@ -78,16 +80,15 @@ pipeline {
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                        docker tag ${IMAGE_NAME}:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                        docker tag ${IMAGE_NAME}:${IMAGE_VERSION} ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
                     """
                 }
             }
             post {
                 always {
                     echo "=================================================================================================="
-
                 }
             }
         }
@@ -96,14 +97,14 @@ pipeline {
             steps {
                 sh """
                     ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
-                        aws ecr get-login-password --region ap-south-1 | \
+                        aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                        docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                        docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                        docker rm -f taskflow-temp || true
+                        docker rm -f ${CONTAINER_NAME} || true
 
-                        CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest)
+                        CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION})
 
                         rm -rf /tmp/taskflow-dist
                         mkdir -p /tmp/taskflow-dist
@@ -112,10 +113,10 @@ pipeline {
 
                         docker rm -f \$CONTAINER_ID || true
 
-                        sudo mkdir -p /var/www/prod
-                        sudo rm -rf /var/www/prod/*
+                        sudo mkdir -p ${DEPLOY_PATH}
+                        sudo rm -rf ${DEPLOY_PATH}/*
 
-                        sudo cp -r /tmp/taskflow-dist/* /var/www/prod/
+                        sudo cp -r /tmp/taskflow-dist/* ${DEPLOY_PATH}/
 
                         sudo systemctl reload nginx || sudo systemctl restart nginx || true
                     '
