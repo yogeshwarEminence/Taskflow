@@ -5,191 +5,102 @@ pipeline {
         GIT_URL = credentials('git-url')
         APP_SERVER = credentials('app_server')
 
-        EMAIL_TO = "yogeshwar.theeminence@gmail.com"
-        SLACK_CHANNEL = "#jenkins-notifications"
-
         AWS_REGION = "ap-south-1"
         ECR_REGISTRY = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
         ECR_REPOSITORY = "taskflow"
 
         IMAGE_NAME = "taskflow"
-        APP_NAME = "taskflow"
+        CONTAINER_NAME = "taskflow-temp"
     }
 
     stages {
 
-        stage("Select Branch") {
+        stage("Select Environment") {
             steps {
                 script {
-
                     cleanWs()
 
                     env.ENV = input(
-                        message: "Select Deployment Environment",
+                        message: "Select Environment",
                         parameters: [
-                            choice(
-                                name: 'BRANCH',
-                                choices: ['PROD', 'DEV'],
-                                description: 'Select Deployment Environment'
-                            )
+                            choice(name: 'ENV', choices: ['PROD', 'DEV'], description: 'Deploy env')
                         ]
                     )
 
-                    if (env.ENV == "PROD") {
-                        env.BRANCH_NAME = "main"
-                    } else {
-                        env.BRANCH_NAME = "dev"
-                    }
+                    env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
+                    env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
 
-                    echo "=================================="
-                    echo "Environment : ${env.ENV}"
-                    echo "Branch      : ${env.BRANCH_NAME}"
-                    echo "=================================="
+                    echo "ENV: ${env.ENV}"
+                    echo "BRANCH: ${env.BRANCH_NAME}"
+                    echo "PATH: ${env.DEPLOY_PATH}"
                 }
             }
         }
 
-        stage("Checkout Source Code") {
+        stage("Clone Repo") {
             steps {
-                script {
-                    try {
-
-                        git branch: env.BRANCH_NAME,
-                            url: env.GIT_URL
-
-                    } catch (Exception e) {
-
-                        echo "Checkout Failed"
-                        echo "${e.getMessage()}"
-
-                        throw e
-                    }
-                }
+                git branch: env.BRANCH_NAME, url: env.GIT_URL
             }
         }
 
         stage("Build Docker Image") {
             steps {
-                script {
-                    try {
+                sh """
+                    docker build -t ${IMAGE_NAME}:latest .
+                """
+            }
+        }
 
-                        sh """
-                            docker build -t ${IMAGE_NAME}:latest .
-                        """
+        stage("Push to ECR") {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    sh """
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                    } catch (Exception e) {
+                        docker tag ${IMAGE_NAME}:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
 
-                        echo "Docker Build Failed"
-                        echo "${e.getMessage()}"
-
-                        throw e
-                    }
+                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
+                    """
                 }
             }
         }
 
-        stage("Login To ECR") {
+        stage("Deploy on EC2 (Pull + Extract + Copy)") {
             steps {
-                script {
-                    try {
+                sh """
+ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
 
-                        withCredentials([
-                            usernamePassword(
-                                credentialsId: 'aws-creds',
-                                usernameVariable: 'AWS_ACCESS_KEY_ID',
-                                passwordVariable: 'AWS_SECRET_ACCESS_KEY'
-                            )
-                        ]) {
+    aws ecr get-login-password --region ap-south-1 | \
+    docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                            sh """
-                                aws ecr get-login-password --region ${AWS_REGION} | \
-                                docker login --username AWS --password-stdin ${ECR_REGISTRY}
-                            """
-                        }
+    docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
 
-                    } catch (Exception e) {
+    docker rm -f taskflow-temp || true
 
-                        echo "ECR Login Failed"
-                        echo "${e.getMessage()}"
+    CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest)
 
-                        throw e
-                    }
-                }
-            }
-        }
+    rm -rf /tmp/taskflow-dist
+    mkdir -p /tmp/taskflow-dist
 
-        stage("Tag Docker Image") {
-            steps {
-                script {
-                    try {
+    docker cp \$CONTAINER_ID:/usr/share/nginx/html/. /tmp/taskflow-dist
 
-                        sh """
-                            docker tag ${IMAGE_NAME}:latest ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-                        """
+    docker rm -f \$CONTAINER_ID || true
 
-                    } catch (Exception e) {
+    sudo mkdir -p /var/www/prod
+    sudo rm -rf /var/www/prod/*
 
-                        echo "Docker Tag Failed"
-                        echo "${e.getMessage()}"
+    sudo cp -r /tmp/taskflow-dist/* /var/www/prod/
 
-                        throw e
-                    }
-                }
-            }
-        }
-
-        stage("Push Image To ECR") {
-            steps {
-                script {
-                    try {
-
-                        sh """
-                            docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-                        """
-
-                    } catch (Exception e) {
-
-                        echo "ECR Push Failed"
-                        echo "${e.getMessage()}"
-
-                        throw e
-                    }
-                }
-            }
-        }
-
-        stage("Deploy To EC2") {
-            steps {
-                script {
-                    try {
-
-                        sh """
-                            ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
-
-                                aws ecr get-login-password --region ${AWS_REGION} | \
-                                docker login --username AWS --password-stdin ${ECR_REGISTRY}
-
-                                docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-
-                                docker stop ${APP_NAME} || true
-
-                                docker rm ${APP_NAME} || true
-
-                                docker run -d \
-                                    --name ${APP_NAME} \
-                                    -p 80:80 \
-                                    ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-                            '
-                        """
-
-                    } catch (Exception e) {
-
-                        echo "Deployment Failed"
-                        echo "${e.getMessage()}"
-
-                        throw e
-                    }
-                }
+    sudo systemctl reload nginx || sudo systemctl restart nginx || true
+'
+"""
             }
         }
     }
@@ -197,87 +108,22 @@ pipeline {
     post {
 
         success {
-
-            script {
-
-                echo "=========================================="
-                echo "Deployment Successful"
-                echo "Environment : ${env.ENV}"
-                echo "Branch      : ${env.BRANCH_NAME}"
-                echo "Image       : ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
-                echo "=========================================="
-
-                emailext(
-                    to: "${EMAIL_TO}",
-                    subject: "Deployment Successful - ${env.ENV}",
-                    body: """
-Deployment Successful
-
-Job Name    : ${JOB_NAME}
-Build Number: ${BUILD_NUMBER}
-Environment : ${env.ENV}
-Branch      : ${env.BRANCH_NAME}
-
-Build URL:
-${BUILD_URL}
-"""
-                )
-
-                slackSend(
-                    channel: "${SLACK_CHANNEL}",
-                    color: "good",
-                    message: """
-✅ Deployment Successful
-
-Environment : ${env.ENV}
-Branch      : ${env.BRANCH_NAME}
-
-Build URL:
-${BUILD_URL}
-"""
-                )
-            }
+            slackSend(
+                channel: "#jenkins-notifications",
+                color: "good",
+                message: "✅ Deployment SUCCESS (${env.ENV}) - ${BUILD_URL}"
+            )
         }
 
         failure {
-
-            script {
-
-                emailext(
-                    to: "${EMAIL_TO}",
-                    subject: "Deployment Failed - ${env.ENV}",
-                    body: """
-Deployment Failed
-
-Job Name    : ${JOB_NAME}
-Build Number: ${BUILD_NUMBER}
-
-Build URL:
-${BUILD_URL}
-"""
-                )
-
-                slackSend(
-                    channel: "${SLACK_CHANNEL}",
-                    color: "danger",
-                    message: """
-❌ Deployment Failed
-
-Environment : ${env.ENV}
-
-Build URL:
-${BUILD_URL}
-"""
-                )
-            }
+            slackSend(
+                channel: "#jenkins-notifications",
+                color: "danger",
+                message: "❌ Deployment FAILED (${env.ENV}) - ${BUILD_URL}"
+            )
         }
 
         always {
-
-            sh '''
-                docker image prune -f || true
-            '''
-
             cleanWs()
         }
     }
