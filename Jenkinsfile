@@ -2,19 +2,18 @@ pipeline {
     agent any
 
     environment {
-        GIT_URL = credentials('git-url')
-        APP_SERVER = credentials('app_server')
+        GIT_URL        = credentials('git-url')
+        APP_SERVER     = credentials('app_server')
 
-        AWS_REGION = "ap-south-1"
-        ECR_REGISTRY = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
+        AWS_REGION     = "ap-south-1"
+        ECR_REGISTRY   = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
         ECR_REPOSITORY = "taskflow"
 
-        IMAGE_NAME = "taskflow"
+        IMAGE_NAME     = "taskflow"
         CONTAINER_NAME = "taskflow-temp"
     }
 
     stages {
-
         stage("Select Environment") {
             steps {
                 script {
@@ -29,8 +28,6 @@ pipeline {
 
                     env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
                     env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
-
-                
                     env.IMAGE_VERSION = "1.0.${BUILD_NUMBER}-${env.ENV}"
 
                     echo "ENV: ${env.ENV}"
@@ -65,6 +62,33 @@ pipeline {
             }
             post {
                 always {
+                    echo "=================================================================================================="
+                }
+            }
+        }
+
+        stage("Trivy Security Scan") {
+            steps {
+                sh """
+                    trivy image \
+                    --severity HIGH,CRITICAL \
+                    --format table \
+                    --output trivy-report.txt \
+                    ${IMAGE_NAME}:${IMAGE_VERSION}
+                """
+
+                sh "cat trivy-report.txt"
+
+                sh """
+                    trivy image \
+                    --severity HIGH,CRITICAL \
+                    --exit-code 1 \
+                    ${IMAGE_NAME}:${IMAGE_VERSION}
+                """
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-report.txt', fingerprint: true
                     echo "=================================================================================================="
                 }
             }
