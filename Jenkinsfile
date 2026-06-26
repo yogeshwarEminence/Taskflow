@@ -14,6 +14,7 @@ pipeline {
     }
 
     stages {
+
         stage("Select Environment") {
             steps {
                 script {
@@ -22,7 +23,11 @@ pipeline {
                     env.ENV = input(
                         message: "Select Environment",
                         parameters: [
-                            choice(name: 'ENV', choices: ['PROD', 'DEV'], description: 'Deploy env')
+                            choice(
+                                name: 'ENV',
+                                choices: ['PROD', 'DEV'],
+                                description: 'Deploy Environment'
+                            )
                         ]
                     )
 
@@ -30,12 +35,13 @@ pipeline {
                     env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
                     env.IMAGE_VERSION = "1.0.${BUILD_NUMBER}-${env.ENV}"
 
-                    echo "ENV: ${env.ENV}"
-                    echo "BRANCH: ${env.BRANCH_NAME}"
-                    echo "DEPLOY_PATH: ${env.DEPLOY_PATH}"
-                    echo "IMAGE_VERSION: ${env.IMAGE_VERSION}"
+                    echo "Environment   : ${env.ENV}"
+                    echo "Branch        : ${env.BRANCH_NAME}"
+                    echo "Deploy Path   : ${env.DEPLOY_PATH}"
+                    echo "Image Version : ${env.IMAGE_VERSION}"
                 }
             }
+
             post {
                 always {
                     echo "=================================================================================================="
@@ -43,10 +49,11 @@ pipeline {
             }
         }
 
-        stage("Clone Repo") {
+        stage("Clone Repository") {
             steps {
                 git branch: env.BRANCH_NAME, url: env.GIT_URL
             }
+
             post {
                 always {
                     echo "=================================================================================================="
@@ -57,9 +64,11 @@ pipeline {
         stage("Build Docker Image") {
             steps {
                 sh """
-                    docker build -t ${IMAGE_NAME}:${IMAGE_VERSION} .
+                    docker build \
+                        -t ${IMAGE_NAME}:${IMAGE_VERSION} .
                 """
             }
+
             post {
                 always {
                     echo "=================================================================================================="
@@ -69,26 +78,41 @@ pipeline {
 
         stage("Trivy Security Scan") {
             steps {
-                sh """
-                    trivy image \
-                    --severity HIGH,CRITICAL \
-                    --format table \
-                    --output trivy-report.txt \
-                    ${IMAGE_NAME}:${IMAGE_VERSION}
-                """
+                script {
 
-                sh "cat trivy-report.txt"
+                    // Generate HTML report
+                    sh """
+                        trivy image \
+                            --severity HIGH,CRITICAL \
+                            --format template \
+                            --template "@/usr/local/share/trivy/html.tpl" \
+                            --output trivy-report.html \
+                            ${IMAGE_NAME}:${IMAGE_VERSION}
+                    """
 
-                sh """
-                    trivy image \
-                    --severity HIGH,CRITICAL \
-                    --exit-code 1 \
-                    ${IMAGE_NAME}:${IMAGE_VERSION}
-                """
+                    // Publish HTML report in Jenkins
+                    publishHTML(target: [
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: '.',
+                        reportFiles: 'trivy-report.html',
+                        reportName: 'Trivy Security Report'
+                    ])
+
+                    // Fail build if vulnerabilities exist
+                    sh """
+                        trivy image \
+                            --severity HIGH,CRITICAL \
+                            --exit-code 1 \
+                            ${IMAGE_NAME}:${IMAGE_VERSION}
+                    """
+                }
             }
+
             post {
                 always {
-                    archiveArtifacts artifacts: 'trivy-report.txt', fingerprint: true
+                    archiveArtifacts artifacts: 'trivy-report.html', fingerprint: true
                     echo "=================================================================================================="
                 }
             }
@@ -96,6 +120,7 @@ pipeline {
 
         stage("Push to ECR") {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'aws-creds',
@@ -103,16 +128,21 @@ pipeline {
                         passwordVariable: 'AWS_SECRET_ACCESS_KEY'
                     )
                 ]) {
+
                     sh """
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                        docker tag ${IMAGE_NAME}:${IMAGE_VERSION} ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                        docker tag \
+                            ${IMAGE_NAME}:${IMAGE_VERSION} \
+                            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                        docker push \
+                            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
                     """
                 }
             }
+
             post {
                 always {
                     echo "=================================================================================================="
@@ -120,10 +150,12 @@ pipeline {
             }
         }
 
-        stage("Deploy on EC2 (Pull + Extract + Copy)") {
+        stage("Deploy on EC2") {
             steps {
+
                 sh """
                     ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
+
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
@@ -138,17 +170,18 @@ pipeline {
 
                         docker cp \$CONTAINER_ID:/usr/share/nginx/html/. /tmp/taskflow-dist
 
-                        docker rm -f \$CONTAINER_ID || true
+                        docker rm -f \$CONTAINER_ID
 
                         sudo mkdir -p ${DEPLOY_PATH}
                         sudo rm -rf ${DEPLOY_PATH}/*
 
                         sudo cp -r /tmp/taskflow-dist/* ${DEPLOY_PATH}/
 
-                        sudo systemctl reload nginx || sudo systemctl restart nginx || true
+                        sudo systemctl reload nginx || sudo systemctl restart nginx
                     '
                 """
             }
+
             post {
                 always {
                     echo "=================================================================================================="
@@ -158,6 +191,7 @@ pipeline {
     }
 
     post {
+
         success {
             slackSend(
                 channel: "#jenkins-notifications",
