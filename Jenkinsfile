@@ -3,8 +3,7 @@ pipeline {
 
     environment {
         GIT_URL        = credentials('git-url')
-        // APP_SERVER     = credentials('app_server')
-        APP_SERVER     = "65.0.81.225"
+        APP_SERVER     = "13.206.221.88"
 
         AWS_REGION     = "ap-south-1"
         ECR_REGISTRY   = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
@@ -12,10 +11,13 @@ pipeline {
 
         IMAGE_NAME     = "taskflow"
         CONTAINER_NAME = "taskflow-temp"
+
+        // Persistent, jenkins-owned cache OUTSIDE the workspace so it
+        // survives cleanWs() and isn't re-downloaded every build.
+        TRIVY_CACHE_DIR = "/opt/trivy-cache"
     }
 
     stages {
-
         stage("Select Environment") {
             steps {
                 script {
@@ -32,8 +34,8 @@ pipeline {
                         ]
                     )
 
-                    env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
-                    env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
+                    env.BRANCH_NAME   = (env.ENV == "PROD") ? "main" : "dev"
+                    env.DEPLOY_PATH   = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
                     env.IMAGE_VERSION = "1.0.${BUILD_NUMBER}-${env.ENV}"
 
                     echo "Environment   : ${env.ENV}"
@@ -42,7 +44,6 @@ pipeline {
                     echo "Image Version : ${env.IMAGE_VERSION}"
                 }
             }
-
             post {
                 always {
                     echo "=================================================================================================="
@@ -53,9 +54,8 @@ pipeline {
         stage("Clone Repository") {
             steps {
                 git branch: env.BRANCH_NAME,
-                url: env.GIT_URL
+                    url: env.GIT_URL
             }
-
             post {
                 always {
                     echo "=================================================================================================="
@@ -70,7 +70,6 @@ pipeline {
                         -t ${IMAGE_NAME}:${IMAGE_VERSION} .
                 """
             }
-
             post {
                 always {
                     echo "=================================================================================================="
@@ -79,37 +78,41 @@ pipeline {
         }
 
         stage("Trivy Security Scan") {
-    steps {
-        script {
+            steps {
+                script {
+                    sh """
+                        mkdir -p trivy-reports
+                        mkdir -p ${TRIVY_CACHE_DIR}
 
-            sh """
-                mkdir -p trivy-reports
+                        trivy image \
+                          --cache-dir ${TRIVY_CACHE_DIR} \
+                          --scanners vuln \
+                          --pkg-types os \
+                          --format template \
+                          --template @/usr/local/share/trivy/html.tpl \
+                          --output trivy-reports/trivy-report.html \
+                          ${IMAGE_NAME}:${IMAGE_VERSION}
+                    """
 
-                # HTML Report
-                trivy image --format template --template "@/usr/local/share/trivy/html.tpl" --output trivy-reports/trivy-report.html ${IMAGE_NAME}:${IMAGE_VERSION}
-            """
-
-            publishHTML(target: [
-                allowMissing: false,
-                alwaysLinkToLastBuild: true,
-                keepAll: true,
-                reportDir: 'trivy-reports',
-                reportFiles: 'trivy-report.html',
-                reportName: 'Trivy Security Report'
-            ])
+                    publishHTML(target: [
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'trivy-reports',
+                        reportFiles: 'trivy-report.html',
+                        reportName: 'Trivy Security Report'
+                    ])
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-reports/*', fingerprint: true
+                }
+            }
         }
-    }
-
-    post {
-        always {
-            archiveArtifacts artifacts: 'trivy-reports/*', fingerprint: true
-        }
-    }
-}
 
         stage("Push to ECR") {
             steps {
-
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'aws-creds',
@@ -117,7 +120,6 @@ pipeline {
                         passwordVariable: 'AWS_SECRET_ACCESS_KEY'
                     )
                 ]) {
-
                     sh """
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
@@ -131,7 +133,6 @@ pipeline {
                     """
                 }
             }
-
             post {
                 always {
                     echo "=================================================================================================="
@@ -141,10 +142,8 @@ pipeline {
 
         stage("Deploy on EC2") {
             steps {
-
                 sh """
                     ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
-
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
@@ -167,10 +166,27 @@ pipeline {
                         sudo cp -r /tmp/taskflow-dist/* ${DEPLOY_PATH}/
 
                         sudo systemctl reload nginx || sudo systemctl restart nginx
+
+                        # Keep the app server clean too - remove dangling images/layers
+                        docker image prune -af --filter "until=24h" || true
                     '
                 """
             }
+            post {
+                always {
+                    echo "=================================================================================================="
+                }
+            }
+        }
 
+        stage("Cleanup Local Images") {
+            steps {
+                sh """
+                    docker rmi ${IMAGE_NAME}:${IMAGE_VERSION} || true
+                    docker rmi ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION} || true
+                    docker image prune -af --filter "until=24h" || true
+                """
+            }
             post {
                 always {
                     echo "=================================================================================================="
@@ -180,7 +196,6 @@ pipeline {
     }
 
     post {
-
         success {
             slackSend(
                 channel: "#jenkins-notifications",
@@ -188,7 +203,6 @@ pipeline {
                 message: "✅ Deployment SUCCESS (${env.ENV}) - ${BUILD_URL}"
             )
         }
-
         failure {
             slackSend(
                 channel: "#jenkins-notifications",
@@ -196,7 +210,6 @@ pipeline {
                 message: "❌ Deployment FAILED (${env.ENV}) - ${BUILD_URL}"
             )
         }
-
         always {
             cleanWs()
         }
