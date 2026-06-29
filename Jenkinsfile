@@ -140,38 +140,37 @@ pipeline {
             }
         }
 
-        stage("Deploy on EC2 (File Deploy)") {
-    steps {
-        sh """
+       stage("Deploy on EC2 (File Deploy)") {
+        steps {
+            sh """
             ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
-                
+
+                set -e
+
                 aws ecr get-login-password --region ${AWS_REGION} | \
                 docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
                 docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                # stop old container if running (optional)
                 docker rm -f ${CONTAINER_NAME} || true
 
-                # create temp container (NO RUN)
                 docker create --name temp_extract ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                # clean old files
-                sudo rm -rf ${DEPLOY_PATH}/*
+                # FIX PERMISSIONS (IMPORTANT - from your manual fix)
+                sudo rm -rf ${DEPLOY_PATH}
                 sudo mkdir -p ${DEPLOY_PATH}
+                sudo chmod -R 777 ${DEPLOY_PATH}
 
-                # copy build files from container
+                # COPY FILES (WORKING PATH CONFIRMED)
                 docker cp temp_extract:/usr/share/nginx/html/. ${DEPLOY_PATH}
 
                 docker rm temp_extract
 
-                # fix permissions
-                sudo chown -R www-data:www-data ${DEPLOY_PATH} || true
+                echo "Deployment successful to ${DEPLOY_PATH}"
 
-                echo "Deployment completed to ${DEPLOY_PATH}"
             '
-        """
-    }
+            """
+        }
 }
 
         stage("Cleanup Local Images") {
