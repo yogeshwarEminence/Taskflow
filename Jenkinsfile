@@ -2,20 +2,22 @@ pipeline {
     agent any
 
     environment {
-        GIT_URL = credentials('git-url')
-        APP_SERVER = credentials('app_server')
+        GIT_URL        = credentials('git-url')
+        APP_SERVER     = "13.233.207.87"
 
-        AWS_REGION = "ap-south-1"
-        ECR_REGISTRY = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
+        AWS_REGION     = "ap-south-1"
+        ECR_REGISTRY   = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
         ECR_REPOSITORY = "taskflow"
 
-        IMAGE_NAME = "taskflow"
-        IMAGE_VERSION = "1.0.${BUILD_NUMBER}"
+        IMAGE_NAME     = "taskflow"
         CONTAINER_NAME = "taskflow-temp"
+
+        // Persistent, jenkins-owned cache OUTSIDE the workspace so it
+        // survives cleanWs() and isn't re-downloaded every build.
+        TRIVY_CACHE_DIR = "/opt/trivy-cache"
     }
 
     stages {
-
         stage("Select Environment") {
             steps {
                 script {
@@ -24,16 +26,22 @@ pipeline {
                     env.ENV = input(
                         message: "Select Environment",
                         parameters: [
-                            choice(name: 'ENV', choices: ['PROD', 'DEV'], description: 'Deploy env')
+                            choice(
+                                name: 'ENV',
+                                choices: ['PROD', 'DEV'],
+                                description: 'Deploy Environment'
+                            )
                         ]
                     )
 
-                    env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
-                    env.DEPLOY_PATH = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
+                    env.BRANCH_NAME   = (env.ENV == "PROD") ? "main" : "dev"
+                    env.DEPLOY_PATH   = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
+                    env.IMAGE_VERSION = "1.0.${BUILD_NUMBER}-${env.ENV}"
 
-                    echo "ENV: ${env.ENV}"
-                    echo "BRANCH: ${env.BRANCH_NAME}"
-                    echo "DEPLOY_PATH: ${env.DEPLOY_PATH}"
+                    echo "Environment   : ${env.ENV}"
+                    echo "Branch        : ${env.BRANCH_NAME}"
+                    echo "Deploy Path   : ${env.DEPLOY_PATH}"
+                    echo "Image Version : ${env.IMAGE_VERSION}"
                 }
             }
             post {
@@ -43,9 +51,10 @@ pipeline {
             }
         }
 
-        stage("Clone Repo") {
+        stage("Clone Repository") {
             steps {
-                git branch: env.BRANCH_NAME, url: env.GIT_URL
+                git branch: env.BRANCH_NAME,
+                    url: env.GIT_URL
             }
             post {
                 always {
@@ -57,12 +66,47 @@ pipeline {
         stage("Build Docker Image") {
             steps {
                 sh """
-                    docker build -t ${IMAGE_NAME}:${IMAGE_VERSION} .
+                    docker build \
+                        -t ${IMAGE_NAME}:${IMAGE_VERSION} .
                 """
             }
             post {
                 always {
                     echo "=================================================================================================="
+                }
+            }
+        }
+
+        stage("Trivy Security Scan") {
+            steps {
+                script {
+                    sh """
+                        mkdir -p trivy-reports
+                        mkdir -p ${TRIVY_CACHE_DIR}
+
+                        trivy image \
+                          --cache-dir ${TRIVY_CACHE_DIR} \
+                          --scanners vuln \
+                          --pkg-types os \
+                          --format template \
+                          --template  @/usr/local/share/trivy/html.tpl \
+                          --output trivy-reports/trivy-report.html \
+                          ${IMAGE_NAME}:${IMAGE_VERSION}
+                    """
+
+                    publishHTML(target: [
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'trivy-reports',
+                        reportFiles: 'trivy-report.html',
+                        reportName: 'Trivy Security Report'
+                    ])
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-reports/*', fingerprint: true
                 }
             }
         }
@@ -80,9 +124,12 @@ pipeline {
                         aws ecr get-login-password --region ${AWS_REGION} | \
                         docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                        docker tag ${IMAGE_NAME}:${IMAGE_VERSION} ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                        docker tag \
+                            ${IMAGE_NAME}:${IMAGE_VERSION} \
+                            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                        docker push ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                        docker push \
+                            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
                     """
                 }
             }
@@ -93,33 +140,45 @@ pipeline {
             }
         }
 
-        stage("Deploy on EC2 (Pull + Extract + Copy)") {
+       stage("Deploy on EC2 (File Deploy)") {
+        steps {
+            sh """
+            ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
+
+                set -e
+
+                aws ecr get-login-password --region ${AWS_REGION} | \
+                docker login --username AWS --password-stdin ${ECR_REGISTRY}
+
+                docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
+                docker rm -f ${CONTAINER_NAME} || true
+
+                docker create --name temp_extract ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
+                # FIX PERMISSIONS (IMPORTANT - from your manual fix)
+                sudo rm -rf ${DEPLOY_PATH}
+                sudo mkdir -p ${DEPLOY_PATH}
+                sudo chmod -R 777 ${DEPLOY_PATH}
+
+                # COPY FILES (WORKING PATH CONFIRMED)
+                docker cp temp_extract:/usr/share/nginx/html/. ${DEPLOY_PATH}
+
+                docker rm temp_extract
+
+                echo "Deployment successful to ${DEPLOY_PATH}"
+
+            '
+            """
+        }
+}
+
+        stage("Cleanup Local Images") {
             steps {
                 sh """
-                    ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
-                        aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
-
-                        docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
-
-                        docker rm -f ${CONTAINER_NAME} || true
-
-                        CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION})
-
-                        rm -rf /tmp/taskflow-dist
-                        mkdir -p /tmp/taskflow-dist
-
-                        docker cp \$CONTAINER_ID:/usr/share/nginx/html/. /tmp/taskflow-dist
-
-                        docker rm -f \$CONTAINER_ID || true
-
-                        sudo mkdir -p ${DEPLOY_PATH}
-                        sudo rm -rf ${DEPLOY_PATH}/*
-
-                        sudo cp -r /tmp/taskflow-dist/* ${DEPLOY_PATH}/
-
-                        sudo systemctl reload nginx || sudo systemctl restart nginx || true
-                    '
+                    docker rmi ${IMAGE_NAME}:${IMAGE_VERSION} || true
+                    docker rmi ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION} || true
+                    docker image prune -af --filter "until=24h" || true
                 """
             }
             post {
@@ -138,7 +197,6 @@ pipeline {
                 message: "✅ Deployment SUCCESS (${env.ENV}) - ${BUILD_URL}"
             )
         }
-
         failure {
             slackSend(
                 channel: "#jenkins-notifications",
@@ -146,7 +204,6 @@ pipeline {
                 message: "❌ Deployment FAILED (${env.ENV}) - ${BUILD_URL}"
             )
         }
-
         always {
             cleanWs()
         }
