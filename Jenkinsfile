@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         GIT_URL        = credentials('git-url')
-        APP_SERVER     = "13.206.221.88"
+        APP_SERVER     = "13.233.207.87"
 
         AWS_REGION     = "ap-south-1"
         ECR_REGISTRY   = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
@@ -89,7 +89,7 @@ pipeline {
                           --scanners vuln \
                           --pkg-types os \
                           --format template \
-                          --template @/usr/local/share/trivy/html.tpl \
+                          --template  @/usr/local/share/trivy/html.tpl \
                           --output trivy-reports/trivy-report.html \
                           ${IMAGE_NAME}:${IMAGE_VERSION}
                     """
@@ -140,44 +140,39 @@ pipeline {
             }
         }
 
-        stage("Deploy on EC2") {
-            steps {
-                sh """
-                    ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
-                        aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
+        stage("Deploy on EC2 (File Deploy)") {
+    steps {
+        sh """
+            ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
+                
+                aws ecr get-login-password --region ${AWS_REGION} | \
+                docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                        docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                        docker rm -f ${CONTAINER_NAME} || true
+                # stop old container if running (optional)
+                docker rm -f ${CONTAINER_NAME} || true
 
-                        CONTAINER_ID=\$(docker create ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION})
+                # create temp container (NO RUN)
+                docker create --name temp_extract ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                        rm -rf /tmp/taskflow-dist
-                        mkdir -p /tmp/taskflow-dist
+                # clean old files
+                sudo rm -rf ${DEPLOY_PATH}/*
+                sudo mkdir -p ${DEPLOY_PATH}
 
-                        docker cp \$CONTAINER_ID:/usr/share/nginx/html/. /tmp/taskflow-dist
+                # copy build files from container
+                docker cp temp_extract:/usr/share/nginx/html/. ${DEPLOY_PATH}
 
-                        docker rm -f \$CONTAINER_ID
+                docker rm temp_extract
 
-                        sudo mkdir -p ${DEPLOY_PATH}
-                        sudo rm -rf ${DEPLOY_PATH}/*
+                # fix permissions
+                sudo chown -R www-data:www-data ${DEPLOY_PATH} || true
 
-                        sudo cp -r /tmp/taskflow-dist/* ${DEPLOY_PATH}/
-
-                        sudo systemctl reload nginx || sudo systemctl restart nginx
-
-                        # Keep the app server clean too - remove dangling images/layers
-                        docker image prune -af --filter "until=24h" || true
-                    '
-                """
-            }
-            post {
-                always {
-                    echo "=================================================================================================="
-                }
-            }
-        }
+                echo "Deployment completed to ${DEPLOY_PATH}"
+            '
+        """
+    }
+}
 
         stage("Cleanup Local Images") {
             steps {
