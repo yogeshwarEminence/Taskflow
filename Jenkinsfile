@@ -3,7 +3,8 @@ pipeline {
 
     environment {
         GIT_URL        = credentials('git-url')
-        APP_SERVER     = credentials('app_server')
+        // APP_SERVER     = credentials('app_server')
+        APP_SERVER     = "65.0.81.225"
 
         AWS_REGION     = "ap-south-1"
         ECR_REGISTRY   = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
@@ -51,7 +52,8 @@ pipeline {
 
         stage("Clone Repository") {
             steps {
-                git branch: env.BRANCH_NAME, url: env.GIT_URL
+                git branch: env.BRANCH_NAME,
+                url: env.GIT_URL
             }
 
             post {
@@ -77,46 +79,33 @@ pipeline {
         }
 
         stage("Trivy Security Scan") {
-            steps {
-                script {
+    steps {
+        script {
 
-                    // Generate HTML report
-                    sh """
-                        trivy image \
-                            --severity HIGH,CRITICAL \
-                            --format template \
-                            --template "@/usr/local/share/trivy/html.tpl" \
-                            --output trivy-report.html \
-                            ${IMAGE_NAME}:${IMAGE_VERSION}
-                    """
+            sh """
+                mkdir -p trivy-reports
 
-                    // Publish HTML report in Jenkins
-                    publishHTML(target: [
-                        allowMissing: false,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: '.',
-                        reportFiles: 'trivy-report.html',
-                        reportName: 'Trivy Security Report'
-                    ])
+                # HTML Report
+                trivy image --format template --template "@/usr/local/share/trivy/html.tpl" --output trivy-reports/trivy-report.html ${IMAGE_NAME}:${IMAGE_VERSION}
+            """
 
-                    // Fail build if vulnerabilities exist
-                    sh """
-                        trivy image \
-                            --severity HIGH,CRITICAL \
-                            --exit-code 1 \
-                            ${IMAGE_NAME}:${IMAGE_VERSION}
-                    """
-                }
-            }
-
-            post {
-                always {
-                    archiveArtifacts artifacts: 'trivy-report.html', fingerprint: true
-                    echo "=================================================================================================="
-                }
-            }
+            publishHTML(target: [
+                allowMissing: false,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: 'trivy-reports',
+                reportFiles: 'trivy-report.html',
+                reportName: 'Trivy Security Report'
+            ])
         }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'trivy-reports/*', fingerprint: true
+        }
+    }
+}
 
         stage("Push to ECR") {
             steps {
