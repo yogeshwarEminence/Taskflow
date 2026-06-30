@@ -3,7 +3,6 @@ pipeline {
 
     environment {
         GIT_URL        = credentials('git-url')
-        APP_SERVER     = "13.233.207.87"
 
         AWS_REGION     = "ap-south-1"
         ECR_REGISTRY   = "792612173141.dkr.ecr.ap-south-1.amazonaws.com"
@@ -12,15 +11,15 @@ pipeline {
         IMAGE_NAME     = "taskflow"
         CONTAINER_NAME = "taskflow-temp"
 
-        // Persistent, jenkins-owned cache OUTSIDE the workspace so it
-        // survives cleanWs() and isn't re-downloaded every build.
         TRIVY_CACHE_DIR = "/opt/trivy-cache"
     }
 
     stages {
+
         stage("Select Environment") {
             steps {
                 script {
+
                     cleanWs()
 
                     env.ENV = input(
@@ -34,85 +33,92 @@ pipeline {
                         ]
                     )
 
-                    env.BRANCH_NAME   = (env.ENV == "PROD") ? "main" : "dev"
-                    env.DEPLOY_PATH   = (env.ENV == "PROD") ? "/var/www/prod" : "/var/www/dev"
+
+                    env.BRANCH_NAME = (env.ENV == "PROD") ? "main" : "dev"
+
+                    env.DEPLOY_PATH = (env.ENV == "PROD") ?
+                        "/var/www/prod" :
+                        "/var/www/dev"
+
+
+                    // Dynamic server based on environment
+                    env.APP_SERVER = (env.ENV == "PROD") ?
+                        "tqzom.xyz" :
+                        "dev.tqzom.xyz"
+
+
                     env.IMAGE_VERSION = "1.0.${BUILD_NUMBER}-${env.ENV}"
+
 
                     echo "Environment   : ${env.ENV}"
                     echo "Branch        : ${env.BRANCH_NAME}"
+                    echo "Deploy Server : ${env.APP_SERVER}"
                     echo "Deploy Path   : ${env.DEPLOY_PATH}"
                     echo "Image Version : ${env.IMAGE_VERSION}"
                 }
             }
-            post {
-                always {
-                    echo "=================================================================================================="
-                }
-            }
         }
+
 
         stage("Clone Repository") {
             steps {
                 git branch: env.BRANCH_NAME,
                     url: env.GIT_URL
             }
-            post {
-                always {
-                    echo "=================================================================================================="
-                }
-            }
         }
+
 
         stage("Build Docker Image") {
             steps {
                 sh """
                     docker build \
-                        -t ${IMAGE_NAME}:${IMAGE_VERSION} .
+                    -t ${IMAGE_NAME}:${IMAGE_VERSION} .
                 """
             }
-            post {
-                always {
-                    echo "=================================================================================================="
-                }
-            }
         }
+
 
         stage("Trivy Security Scan") {
             steps {
                 script {
-                    sh """
-                        mkdir -p trivy-reports
-                        mkdir -p ${TRIVY_CACHE_DIR}
 
-                        trivy image \
-                          --cache-dir ${TRIVY_CACHE_DIR} \
-                          --scanners vuln \
-                          --pkg-types os \
-                          --format template \
-                          --template  @/usr/local/share/trivy/html.tpl \
-                          --output trivy-reports/trivy-report.html \
-                          ${IMAGE_NAME}:${IMAGE_VERSION}
+                    sh """
+
+                    mkdir -p trivy-reports
+                    mkdir -p ${TRIVY_CACHE_DIR}
+
+
+                    trivy image \
+                    --cache-dir ${TRIVY_CACHE_DIR} \
+                    --scanners vuln \
+                    --pkg-types os \
+                    --format template \
+                    --template @/usr/local/share/trivy/html.tpl \
+                    --output trivy-reports/trivy-report.html \
+                    ${IMAGE_NAME}:${IMAGE_VERSION}
+
                     """
 
-                    publishHTML(target: [
-                        allowMissing: false,
-                        alwaysLinkToLastBuild: true,
-                        keepAll: true,
-                        reportDir: 'trivy-reports',
-                        reportFiles: 'trivy-report.html',
-                        reportName: 'Trivy Security Report'
-                    ])
-                }
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'trivy-reports/*', fingerprint: true
+
+                    publishHTML(
+                        target: [
+                            allowMissing: false,
+                            alwaysLinkToLastBuild: true,
+                            keepAll: true,
+                            reportDir: 'trivy-reports',
+                            reportFiles: 'trivy-report.html',
+                            reportName: 'Trivy Security Report'
+                        ]
+                    )
                 }
             }
         }
 
+
         stage("Push to ECR") {
+
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'aws-creds',
@@ -120,92 +126,149 @@ pipeline {
                         passwordVariable: 'AWS_SECRET_ACCESS_KEY'
                     )
                 ]) {
+
                     sh """
-                        aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                        docker tag \
-                            ${IMAGE_NAME}:${IMAGE_VERSION} \
-                            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                    aws ecr get-login-password \
+                    --region ${AWS_REGION} | \
+                    docker login \
+                    --username AWS \
+                    --password-stdin ${ECR_REGISTRY}
 
-                        docker push \
-                            ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
+                    docker tag \
+                    ${IMAGE_NAME}:${IMAGE_VERSION} \
+                    ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
+
+                    docker push \
+                    ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
                     """
                 }
             }
-            post {
-                always {
-                    echo "=================================================================================================="
-                }
-            }
         }
 
-       stage("Deploy on EC2 (File Deploy)") {
-        steps {
-            sh """
-            ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
+
+
+        stage("Deploy on EC2") {
+
+            steps {
+
+                sh """
+
+                ssh -o StrictHostKeyChecking=no ubuntu@${APP_SERVER} '
 
                 set -e
 
-                aws ecr get-login-password --region ${AWS_REGION} | \
-                docker login --username AWS --password-stdin ${ECR_REGISTRY}
 
-                docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+                aws ecr get-login-password \
+                --region ${AWS_REGION} | \
+                docker login \
+                --username AWS \
+                --password-stdin ${ECR_REGISTRY}
+
+
+
+                docker pull \
+                ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
+
 
                 docker rm -f ${CONTAINER_NAME} || true
 
-                docker create --name temp_extract ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
 
-                # FIX PERMISSIONS (IMPORTANT - from your manual fix)
+
+                docker create \
+                --name temp_extract \
+                ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION}
+
+
+
                 sudo rm -rf ${DEPLOY_PATH}
+
+
                 sudo mkdir -p ${DEPLOY_PATH}
+
+
                 sudo chmod -R 777 ${DEPLOY_PATH}
 
-                # COPY FILES (WORKING PATH CONFIRMED)
-                docker cp temp_extract:/usr/share/nginx/html/. ${DEPLOY_PATH}
+
+
+                docker cp \
+                temp_extract:/usr/share/nginx/html/. \
+                ${DEPLOY_PATH}
+
+
 
                 docker rm temp_extract
 
-                echo "Deployment successful to ${DEPLOY_PATH}"
 
-            '
-            """
-        }
-}
 
-        stage("Cleanup Local Images") {
-            steps {
-                sh """
-                    docker rmi ${IMAGE_NAME}:${IMAGE_VERSION} || true
-                    docker rmi ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION} || true
-                    docker image prune -af --filter "until=24h" || true
+                echo "Deployment successful"
+
+                '
+
                 """
             }
-            post {
-                always {
-                    echo "=================================================================================================="
-                }
+        }
+
+
+
+        stage("Cleanup Local Images") {
+
+            steps {
+
+                sh """
+
+                docker rmi \
+                ${IMAGE_NAME}:${IMAGE_VERSION} || true
+
+
+                docker rmi \
+                ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_VERSION} || true
+
+
+                docker image prune -af \
+                --filter "until=24h" || true
+
+                """
             }
         }
+
     }
 
+
     post {
+
         success {
+
             slackSend(
                 channel: "#jenkins-notifications",
                 color: "good",
                 message: "✅ Deployment SUCCESS (${env.ENV}) - ${BUILD_URL}"
             )
+
         }
+
+
         failure {
+
             slackSend(
                 channel: "#jenkins-notifications",
                 color: "danger",
                 message: "❌ Deployment FAILED (${env.ENV}) - ${BUILD_URL}"
             )
+
         }
+
+
         always {
+
             cleanWs()
+
         }
+
     }
+
 }
